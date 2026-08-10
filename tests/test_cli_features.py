@@ -45,3 +45,26 @@ def test_tool_usage_tracker_reports_tool_errors() -> None:
     tracker.on_tool_error(ValueError("failed"), run_id=run_id)
 
     assert output[-1] == "[tool] update failed in 0.100s: ValueError"
+
+
+def test_tool_usage_tracker_displays_concise_tool_arguments() -> None:
+    output: list[str] = []
+    tracker = ToolUsageTracker(output=output.append, clock=lambda: 1.0)
+
+    tracker.on_tool_start(
+        {"name": "search"},
+        "",
+        run_id=uuid4(),
+        inputs={"query": "WorkspaceTools", "path": "python_agent", "file_glob": "*.py"},
+    )
+    tracker.on_tool_start(
+        {"name": "update"},
+        "",
+        run_id=uuid4(),
+        inputs={"path": "app.py", "old_text": "flag = False", "new_text": "flag = True"},
+    )
+
+    assert output == [
+        "[tool] search(query='WorkspaceTools', path='python_agent', file_glob='*.py') started",
+        "[tool] update(path='app.py', old_text=<12 chars>, new_text=<11 chars>) started",
+    ]

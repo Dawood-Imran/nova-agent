@@ -116,6 +116,7 @@ def test_run_prompt_reports_real_graph_tool_usage(tmp_path: Path) -> None:
 
     assert text == "Done."
     assert tracker.tool_names == ["write"]
+    assert output[0] == "[tool] write(path='tracked.txt', content=<7 chars>) started"
     assert any(line.startswith("[tool] write completed in ") for line in output)
     assert output[-1].startswith("[prompt] completed in ")
 

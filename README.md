@@ -63,10 +63,12 @@ Small tagged text files are attached to the prompt automatically. Large, binary,
 Every request prints live tool activity and elapsed time, followed by total prompt time:
 
 ```text
-[tool] search started
+[tool] search(query='WorkspaceTools', path='python_agent', file_glob='*.py') started
 [tool] search completed in 0.012s
 [prompt] completed in 1.438s; 1 tool call: search
 ```
+
+Large edit payloads are summarized rather than printed (for example, `content=<500 chars>`), and arguments whose names indicate credentials or secrets are redacted.
 
 One prompt and exit:
 

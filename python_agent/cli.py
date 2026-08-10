@@ -23,6 +23,9 @@ load_dotenv()  # Load environment variables from .env file
 class ToolUsageTracker(BaseCallbackHandler):
     """Print live tool activity and retain a concise per-prompt usage summary."""
 
+    summarized_arguments = {"content", "new_text", "old_text"}
+    sensitive_argument_fragments = {"api_key", "password", "secret", "token"}
+
     def __init__(
         self,
         output: Callable[[str], None] = print,
@@ -39,12 +42,40 @@ class ToolUsageTracker(BaseCallbackHandler):
         input_str: str,
         *,
         run_id: UUID,
+        inputs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        del input_str, kwargs
+        del kwargs
         name = serialized.get("name") or "tool"
         self._running[run_id] = (name, self.clock())
-        self.output(f"[tool] {name} started")
+        call = self._format_tool_call(name, inputs, input_str)
+        self.output(f"[tool] {call} started")
+
+    def _format_tool_call(
+        self,
+        name: str,
+        inputs: dict[str, Any] | None,
+        input_str: str,
+    ) -> str:
+        if inputs:
+            arguments = ", ".join(
+                f"{key}={self._format_argument(key, value)}" for key, value in inputs.items()
+            )
+            return f"{name}({arguments})"
+        if input_str:
+            preview = input_str if len(input_str) <= 160 else f"{input_str[:157]}..."
+            return f"{name}({preview})"
+        return name
+
+    def _format_argument(self, key: str, value: Any) -> str:
+        lowered_key = key.lower()
+        if any(fragment in lowered_key for fragment in self.sensitive_argument_fragments):
+            return "<redacted>"
+        if key in self.summarized_arguments and isinstance(value, str):
+            return f"<{len(value)} chars>"
+        if isinstance(value, str) and len(value) > 120:
+            return repr(f"{value[:117]}...")
+        return repr(value)
 
     def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
         del output, kwargs
