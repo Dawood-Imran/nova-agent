@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling==1.29.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pi-python-langgraph-agent"
+version = "0.1.0"
+description = "A small coding agent with workspace tools and a LangGraph agent loop"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "langchain-core==1.5.3",
+    "langchain-openai==1.4.2",
+    "langgraph==1.2.10",
+    "prompt-toolkit==3.0.53",
+    "python-dotenv==1.2.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1"]
+
+[project.scripts]
+python-coding-agent = "python_agent.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["python_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
