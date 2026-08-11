@@ -93,6 +93,18 @@ def test_run_prompt_returns_updated_history_and_text(tmp_path: Path) -> None:
     assert text == "Hello from the agent."
 
 
+def test_run_prompt_streams_messages_from_compiled_graph(tmp_path: Path) -> None:
+    model = ScriptedToolModel(responses=[AIMessage(content="Streamed response.")])
+    agent = create_agent(model, tmp_path)
+    tokens: list[str] = []
+
+    history, text = run_prompt(agent, [], "Hello", token_output=tokens.append)
+
+    assert "".join(tokens) == "Streamed response."
+    assert history[-1].content == "Streamed response."
+    assert text == "Streamed response."
+
+
 def test_run_prompt_reports_real_graph_tool_usage(tmp_path: Path) -> None:
     model = ScriptedToolModel(
         responses=[

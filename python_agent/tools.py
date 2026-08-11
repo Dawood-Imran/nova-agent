@@ -199,17 +199,20 @@ class WorkspaceTools:
 
         resolved = self._resolve(path)
         lines = resolved.read_text(encoding="utf-8").splitlines()
-        if offset > len(lines) and lines:
-            raise ValueError(f"Offset {offset} is beyond end of file ({len(lines)} lines)")
+        if offset > len(lines):
+            return f"(end of file: {len(lines)} lines)"
         selected = lines[offset - 1 :] if limit is None else lines[offset - 1 : offset - 1 + limit]
         return "\n".join(f"{number}|{line}" for number, line in enumerate(selected, start=offset))
 
-    def write(self, path: str, content: str) -> str:
-        """Create or completely overwrite a UTF-8 text file."""
+    def write(self, path: str, content: str, overwrite: bool = False) -> str:
+        """Create a UTF-8 text file. Fails if file exists unless overwrite=True."""
         resolved = self._resolve(path)
+        if resolved.exists() and not overwrite:
+            raise ValueError(f"File already exists: {self._display(resolved)}. Use overwrite=True to replace it.")
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_text(content, encoding="utf-8")
-        return f"Wrote {len(content)} characters to {self._display(resolved)}"
+        action = "overwrote" if overwrite else "wrote"
+        return f"{action.capitalize()} {len(content)} characters to {self._display(resolved)}"
 
     def edit(
         self,

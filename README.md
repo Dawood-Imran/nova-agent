@@ -76,6 +76,8 @@ Every request prints live tool activity and elapsed time, followed by total prom
 [prompt] completed in 1.438s; 1 tool call: search
 ```
 
+Assistant text is streamed token-by-token as the model generates it. Tool calls remain live and line-oriented; if a tool starts while an assistant line is open, the CLI moves the tool status to a new line. The final graph state is still collected so interactive conversation history works exactly as before.
+
 Large edit payloads are summarized rather than printed (for example, `content=<500 chars>`), and arguments whose names indicate credentials or secrets are redacted.
 
 One prompt and exit:

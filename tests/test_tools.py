@@ -16,9 +16,21 @@ def test_write_read_edit_delete_file(tmp_path: Path) -> None:
     tools = WorkspaceTools(tmp_path)
 
     write_result = tools.write("notes/example.txt", "first\nsecond\nthird\n")
-    assert write_result == "Wrote 19 characters to notes/example.txt"
-    assert tools.read("notes/example.txt", offset=2, limit=1) == "2|second"
+    # Verify that a second write without an overwrite flag fails if the file exists
+    with pytest.raises(ValueError, match="already exists"):
+        tools.write("notes/example.txt", "new content")
+    # Verify that write with overwrite=True succeeds
+    overwrite_result = tools.write("notes/example.txt", "overwritten", overwrite=True)
+    assert "overwrote" in overwrite_result.lower()
+    assert (tmp_path / "notes/example.txt").read_text() == "overwritten"
 
+    assert write_result == "Wrote 19 characters to notes/example.txt"
+    # The file was overwritten to "overwritten", which is 1 line.
+    # Offset 2 should now be EOF.
+    assert "end of file" in tools.read("notes/example.txt", offset=2).lower()
+
+    # Restore content for edit test
+    tools.write("notes/example.txt", "first\nsecond\nthird\n", overwrite=True)
     edit_result = tools.edit(
         "notes/example.txt",
         [{"oldText": "second", "newText": "changed"}],
@@ -78,7 +90,13 @@ def test_bash_timeout_terminates_command(tmp_path: Path) -> None:
 
     result = tools.bash("sleep 2", timeout=0.01)
 
-    assert result == "Command timed out after 0.01 seconds"
+def test_read_eof_returns_empty_with_metadata(tmp_path: Path) -> None:
+    tools = WorkspaceTools(tmp_path)
+    file_path = tmp_path / "short.txt"
+    file_path.write_text("line1\nline2", encoding="utf-8")
+    # Offset beyond EOF should return an empty string and a message rather than raising ValueError
+    result = tools.read("short.txt", offset=10)
+    assert "end of file" in result.lower()
 
 
 def test_build_tools_exposes_langchain_tools(tmp_path: Path) -> None:

@@ -1,7 +1,18 @@
 from pathlib import Path
 from uuid import uuid4
 
-from python_agent.cli import ToolUsageTracker, prepare_prompt
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+
+from python_agent.cli import ConsoleStream, ToolUsageTracker, prepare_prompt, run_prompt
+
+
+class FakeStreamingAgent:
+    def stream(self, input, config=None, stream_mode=None):
+        del config
+        assert stream_mode == ["messages", "values"]
+        yield "messages", (AIMessageChunk(content="Hel"), {"langgraph_node": "agent"})
+        yield "messages", (AIMessageChunk(content="lo"), {"langgraph_node": "agent"})
+        yield "values", {"messages": [*input["messages"], AIMessage(content="Hello")]}
 
 
 def test_prepare_prompt_adds_tagged_file_context(tmp_path: Path) -> None:
@@ -71,3 +82,40 @@ def test_tool_usage_tracker_displays_concise_tool_arguments() -> None:
         "[tool] search(query='WorkspaceTools', path='python_agent', file_glob='*.py') started",
         "[tool] edit(path='app.py', edits=<1 replacement>) started",
     ]
+
+
+def test_run_prompt_streams_tokens_and_returns_final_history() -> None:
+    tokens: list[str] = []
+
+    history, text = run_prompt(
+        FakeStreamingAgent(),
+        [],
+        "Hi",
+        token_output=tokens.append,
+    )
+
+    assert tokens == ["Hel", "lo"]
+    assert isinstance(history[0], HumanMessage)
+    assert history[-1].content == "Hello"
+    assert text == "Hello"
+
+
+def test_console_stream_separates_tokens_from_status_lines() -> None:
+    output: list[str] = []
+    stream = ConsoleStream(
+        text_output=lambda text: output.append(f"text:{text}"),
+        line_output=lambda text="": output.append(f"line:{text}"),
+    )
+
+    stream.token("Hello")
+    stream.status("[tool] read started")
+    stream.token("Done\n")
+    stream.finish()
+
+    assert output == [
+        "text:Hello",
+        "line:",
+        "line:[tool] read started",
+        "text:Done\n",
+    ]
+    assert stream.received_text is True
