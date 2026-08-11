@@ -4,9 +4,12 @@ import os
 import shutil
 import signal
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 from langchain_core.tools import BaseTool, tool
+
+from .edit import EditToolInput, ReplacementInput, edit_file
 
 
 class WorkspaceTools:
@@ -144,6 +147,49 @@ class WorkspaceTools:
             matches.append(f"[results truncated at {max_results} matches]")
         return "\n".join(matches)
 
+    def _git(self, arguments: list[str], *, input_text: str | None = None) -> str:
+        """Run a non-interactive Git command in the workspace."""
+        process = subprocess.run(
+            ["git", *arguments],
+            cwd=self.workspace,
+            input=input_text,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if process.returncode != 0:
+            detail = process.stderr.strip() or process.stdout.strip() or "unknown Git error"
+            raise ValueError(detail)
+        return process.stdout
+
+
+    def git_status(self) -> str:
+        """Return the current branch and concise working-tree status."""
+        return self._git(["status", "--short", "--branch"]).rstrip() or "(clean)"
+
+    def git_diff(
+        self,
+        path: str | None = None,
+        staged: bool = False,
+        max_chars: int = 20_000,
+    ) -> str:
+        """Return a bounded staged or unstaged Git diff, optionally for one path."""
+        if max_chars < 1:
+            raise ValueError("max_chars must be at least 1")
+
+        arguments = ["diff", "--no-ext-diff", "--no-textconv", "--no-color"]
+        if staged:
+            arguments.append("--cached")
+        if path is not None:
+            resolved = self._resolve(path)
+            arguments.extend(["--", self._display(resolved)])
+        output = self._git(arguments).rstrip()
+        if not output:
+            return "(no diff)"
+        if len(output) > max_chars:
+            return f"{output[:max_chars]}\n[diff truncated at {max_chars} characters]"
+        return output
+
     def read(self, path: str, offset: int = 1, limit: int | None = None) -> str:
         """Read UTF-8 text with one-based line numbers and optional pagination."""
         if offset < 1:
@@ -165,20 +211,37 @@ class WorkspaceTools:
         resolved.write_text(content, encoding="utf-8")
         return f"Wrote {len(content)} characters to {self._display(resolved)}"
 
-    def update(self, path: str, old_text: str, new_text: str) -> str:
-        """Replace exactly one occurrence of old_text in a UTF-8 text file."""
-        if not old_text:
-            raise ValueError("old_text must not be empty")
+    def edit(
+        self,
+        path: str,
+        edits: Sequence[ReplacementInput | dict[str, str]],
+    ) -> str:
+        """Apply Pi-style non-overlapping replacements against one original file."""
+        content, artifact = self.edit_with_details(path, edits)
+        return (
+            f"{content}\n"
+            f"First changed line: {artifact['firstChangedLine']}\n"
+            f"Patch:\n{artifact['patch']}"
+        )
 
+    def edit_with_details(
+        self,
+        path: str,
+        edits: Sequence[ReplacementInput | dict[str, str]],
+    ) -> tuple[str, dict[str, str | int]]:
+        """Execute an edit and separate model-facing text from UI diff details."""
         resolved = self._resolve(path)
-        content = resolved.read_text(encoding="utf-8")
-        count = content.count(old_text)
-        if count == 0:
-            raise ValueError(f"old_text was not found in {self._display(resolved)}")
-        if count != 1:
-            raise ValueError(f"old_text was found {count} times in {self._display(resolved)}; it must be unique")
-        resolved.write_text(content.replace(old_text, new_text, 1), encoding="utf-8")
-        return f"Updated {self._display(resolved)} (1 replacement)"
+        display = self._display(resolved)
+        result = edit_file(resolved, display, edits)
+        return (
+            f"Successfully replaced {result.replacements} block(s) in {display}.",
+            {
+                "diff": result.diff,
+                "patch": result.patch,
+                "firstChangedLine": result.first_changed_line,
+            },
+        )
+
 
     def delete(self, path: str, recursive: bool = False) -> str:
         """Delete a file, symlink, empty directory, or recursive directory tree."""
@@ -262,19 +325,47 @@ def build_tools(workspace: str | Path) -> list[BaseTool]:
         """Find workspace files by glob pattern. Use this to locate files before reading them."""
         return operations.find_files(pattern, path, max_results)
 
+    @tool("git_status")
+    def git_status_tool() -> str:
+        """Return the current Git branch and concise working-tree status without modifying the repository."""
+        return operations.git_status()
+
+    @tool("git_diff")
+    def git_diff_tool(
+        path: str | None = None,
+        staged: bool = False,
+        max_chars: int = 20_000,
+    ) -> str:
+        """Return a bounded staged or unstaged Git diff, optionally limited to one workspace file."""
+        return operations.git_diff(path, staged, max_chars)
+
     @tool("write")
     def write_tool(path: str, content: str) -> str:
         """Create or completely overwrite a UTF-8 text file and any missing parent directories."""
         return operations.write(path, content)
 
-    @tool("update")
-    def update_tool(path: str, old_text: str, new_text: str) -> str:
-        """Update a file by replacing one exact, unique old_text block with new_text."""
-        return operations.update(path, old_text, new_text)
+    @tool("edit", args_schema=EditToolInput, response_format="content_and_artifact")
+    def edit_tool(
+        path: str,
+        edits: list[ReplacementInput],
+    ) -> tuple[str, dict[str, str | int]]:
+        """Apply one or more unique, non-overlapping text replacements matched against the original file."""
+        return operations.edit_with_details(path, edits)
+
 
     @tool("delete")
     def delete_tool(path: str, recursive: bool = False) -> str:
         """Delete a file or directory. Set recursive only when deleting a non-empty directory tree."""
         return operations.delete(path, recursive)
 
-    return [bash_tool, read_tool, search_tool, find_files_tool, write_tool, update_tool, delete_tool]
+    return [
+        bash_tool,
+        read_tool,
+        search_tool,
+        find_files_tool,
+        git_status_tool,
+        git_diff_tool,
+        write_tool,
+        edit_tool,
+        delete_tool,
+    ]

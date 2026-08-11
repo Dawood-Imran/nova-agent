@@ -1,34 +1,34 @@
 from pathlib import Path
+import subprocess
 
 import pytest
 
 from python_agent.tools import WorkspaceTools, build_tools
 
 
-def test_write_read_update_delete_file(tmp_path: Path) -> None:
+def init_git_repository(path: Path) -> None:
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "nova@example.test"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "NOVA Tests"], cwd=path, check=True)
+
+
+def test_write_read_edit_delete_file(tmp_path: Path) -> None:
     tools = WorkspaceTools(tmp_path)
 
     write_result = tools.write("notes/example.txt", "first\nsecond\nthird\n")
     assert write_result == "Wrote 19 characters to notes/example.txt"
     assert tools.read("notes/example.txt", offset=2, limit=1) == "2|second"
 
-    update_result = tools.update("notes/example.txt", "second", "changed")
-    assert update_result == "Updated notes/example.txt (1 replacement)"
+    edit_result = tools.edit(
+        "notes/example.txt",
+        [{"oldText": "second", "newText": "changed"}],
+    )
+    assert "Successfully replaced 1 block(s)" in edit_result
     assert (tmp_path / "notes/example.txt").read_text() == "first\nchanged\nthird\n"
 
     assert tools.delete("notes/example.txt") == "Deleted file notes/example.txt"
     assert not (tmp_path / "notes/example.txt").exists()
 
-
-def test_update_requires_one_unique_match(tmp_path: Path) -> None:
-    tools = WorkspaceTools(tmp_path)
-    tools.write("duplicate.txt", "same\nsame\n")
-
-    with pytest.raises(ValueError, match="found 2 times"):
-        tools.update("duplicate.txt", "same", "new")
-
-    with pytest.raises(ValueError, match="not found"):
-        tools.update("duplicate.txt", "missing", "new")
 
 
 def test_paths_cannot_escape_workspace(tmp_path: Path) -> None:
@@ -84,7 +84,17 @@ def test_bash_timeout_terminates_command(tmp_path: Path) -> None:
 def test_build_tools_exposes_langchain_tools(tmp_path: Path) -> None:
     tools = {tool.name: tool for tool in build_tools(tmp_path)}
 
-    assert set(tools) == {"bash", "read", "search", "find_files", "write", "update", "delete"}
+    assert set(tools) == {
+        "bash",
+        "delete",
+        "edit",
+        "find_files",
+        "git_diff",
+        "git_status",
+        "read",
+        "search",
+        "write",
+    }
     assert tools["write"].invoke({"path": "from-tool.txt", "content": "hello"}) == (
         "Wrote 5 characters to from-tool.txt"
     )
@@ -132,3 +142,42 @@ def test_search_does_not_follow_file_symlinks_outside_workspace(tmp_path: Path) 
     tools = WorkspaceTools(tmp_path)
 
     assert tools.search("private marker") == "(no matches)"
+
+
+def test_git_status_reports_branch_and_worktree_changes(tmp_path: Path) -> None:
+    init_git_repository(tmp_path)
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=tmp_path, check=True)
+    tracked.write_text("after\n", encoding="utf-8")
+    tools = WorkspaceTools(tmp_path)
+
+    status = tools.git_status()
+
+    assert "## main" in status
+    assert " M tracked.txt" in status
+
+
+def test_git_diff_supports_path_staged_and_bounded_output(tmp_path: Path) -> None:
+    init_git_repository(tmp_path)
+    tracked = tmp_path / "tracked.txt"
+    other = tmp_path / "other.txt"
+    tracked.write_text("before\n", encoding="utf-8")
+    other.write_text("unchanged\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=tmp_path, check=True)
+    tracked.write_text("after\n", encoding="utf-8")
+    tools = WorkspaceTools(tmp_path)
+
+    unstaged = tools.git_diff(path="tracked.txt")
+    assert "-before" in unstaged
+    assert "+after" in unstaged
+    assert "other.txt" not in unstaged
+
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    assert tools.git_diff(path="tracked.txt") == "(no diff)"
+    assert "+after" in tools.git_diff(path="tracked.txt", staged=True)
+    assert tools.git_diff(path="tracked.txt", staged=True, max_chars=20).endswith(
+        "\n[diff truncated at 20 characters]"
+    )

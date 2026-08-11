@@ -1,6 +1,6 @@
-# Python LangGraph Coding Agent
+# NOVA Coding Agent
 
-A standalone Python implementation of Pi-inspired coding tools and a LangGraph tool-calling loop.
+A transparent Python coding agent with workspace-aware tools and a LangGraph tool-calling loop.
 
 ## Included tools
 
@@ -8,8 +8,10 @@ A standalone Python implementation of Pi-inspired coding tools and a LangGraph t
 - `read(path, offset, limit)`: reads UTF-8 text with one-based line numbers and optional pagination.
 - `search(query, path, file_glob, max_results)`: finds literal text with workspace-relative paths and line numbers.
 - `find_files(pattern, path, max_results)`: discovers workspace files using glob patterns.
+- `git_status()`: reports the current branch and concise working-tree state.
+- `git_diff(path, staged, max_chars)`: returns a bounded staged or unstaged diff.
 - `write(path, content)`: creates or completely overwrites a file, including missing parent directories.
-- `update(path, old_text, new_text)`: performs one exact replacement and rejects missing or non-unique matches.
+- `edit(path, edits)`: applies one or more unique, non-overlapping replacements against the same original file.
 - `delete(path, recursive)`: deletes files, symlinks, or directories; non-empty directories require `recursive=true`.
 
 Filesystem tools reject paths that escape the selected workspace. `bash` is intentionally unrestricted and has the same operating-system permissions as the Python process. Use a container or sandbox when commands require stronger isolation.
@@ -24,14 +26,20 @@ START -> agent -> tools -> agent -> ...
                    +-> END when the model returns no tool calls
 ```
 
-The model is bound to all seven tools. `tools_condition` routes tool-calling responses to `ToolNode`; tool results are appended to `MessagesState`, then the model runs again. The loop stops when the model returns a normal assistant response.
+The model is bound to all nine tools. `tools_condition` routes tool-calling responses to `ToolNode`; tool results are appended to `MessagesState`, then the model runs again. The loop stops when the model returns a normal assistant response.
+
+Expected operational failures such as ambiguous replacements, missing files, and overlapping edits are returned to the model as tool messages instead of terminating the graph. The model can inspect the error, read the current file state, and retry with unique context.
+
+To prevent retry loops, NOVA stops after three failures with identical tool arguments or five consecutive tool failures. Live CLI output includes the bounded exception message so failed edit context can be diagnosed instead of showing only `ValueError`.
+
+The `edit` tool matches every `oldText` against the same original content, rejects empty/missing/duplicate/overlapping/no-op edits, applies replacements from right to left, preserves UTF-8 BOM and LF/CRLF line endings, serializes concurrent mutations per file, and returns a unified diff with the first changed line. It also repairs JSON-string and legacy argument forms and conservatively matches common model differences in trailing whitespace, smart quotes, Unicode dashes, and special spaces.
 
 ## Setup
 
 Python 3.11 or newer is required.
 
 ```bash
-cd packages/coding-agent/examples/python-langgraph-agent
+cd /path/to/nova-agent
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 ```

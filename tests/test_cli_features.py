@@ -41,10 +41,10 @@ def test_tool_usage_tracker_reports_tool_errors() -> None:
     tracker = ToolUsageTracker(output=output.append, clock=lambda: next(times))
     run_id = uuid4()
 
-    tracker.on_tool_start({"name": "update"}, "", run_id=run_id)
+    tracker.on_tool_start({"name": "edit"}, "", run_id=run_id)
     tracker.on_tool_error(ValueError("failed"), run_id=run_id)
 
-    assert output[-1] == "[tool] update failed in 0.100s: ValueError"
+    assert output[-1] == "[tool] edit failed in 0.100s: ValueError: failed"
 
 
 def test_tool_usage_tracker_displays_concise_tool_arguments() -> None:
@@ -58,13 +58,16 @@ def test_tool_usage_tracker_displays_concise_tool_arguments() -> None:
         inputs={"query": "WorkspaceTools", "path": "python_agent", "file_glob": "*.py"},
     )
     tracker.on_tool_start(
-        {"name": "update"},
+        {"name": "edit"},
         "",
         run_id=uuid4(),
-        inputs={"path": "app.py", "old_text": "flag = False", "new_text": "flag = True"},
+        inputs={
+            "path": "app.py",
+            "edits": [{"oldText": "flag = False", "newText": "flag = True"}],
+        },
     )
 
     assert output == [
         "[tool] search(query='WorkspaceTools', path='python_agent', file_glob='*.py') started",
-        "[tool] update(path='app.py', old_text=<12 chars>, new_text=<11 chars>) started",
+        "[tool] edit(path='app.py', edits=<1 replacement>) started",
     ]

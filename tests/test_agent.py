@@ -71,8 +71,10 @@ def test_agent_executes_tool_calls_until_model_finishes(tmp_path: Path) -> None:
         "read",
         "search",
         "find_files",
+        "git_status",
+        "git_diff",
         "write",
-        "update",
+        "edit",
         "delete",
     ]
     assert (tmp_path / "result.txt").read_text() == "created by the graph"
@@ -130,3 +132,113 @@ def test_run_prompt_attaches_tagged_content_without_retaining_it_in_history(tmp_
 
     assert "flag = False" in str(model.seen_messages[0][1].content)
     assert history[0].content == "Explain @app.py"
+
+
+def test_agent_receives_ambiguous_edit_error_and_retries(tmp_path: Path) -> None:
+    source = tmp_path / "sample.py"
+    source.write_text(
+        "def subtract(a, b):\n"
+        "    return a - b\n\n"
+        "if __name__ == '__main__':\n"
+        "    print('example')\n\n"
+        "def subtract(a, b):\n"
+        "    return a - b\n",
+        encoding="utf-8",
+    )
+    duplicate_function = "def subtract(a, b):\n    return a - b"
+    unique_trailing_block = (
+        "if __name__ == '__main__':\n"
+        "    print('example')\n\n"
+        "def subtract(a, b):\n"
+        "    return a - b"
+    )
+    model = ScriptedToolModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "edit",
+                        "args": {
+                            "path": "sample.py",
+                            "edits": [{"oldText": duplicate_function, "newText": ""}],
+                        },
+                        "id": "ambiguous-edit",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "edit",
+                        "args": {
+                            "path": "sample.py",
+                            "edits": [
+                                {
+                                    "oldText": unique_trailing_block,
+                                    "newText": "if __name__ == '__main__':\n    print('example')",
+                                }
+                            ],
+                        },
+                        "id": "unique-edit",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="Removed the duplicate function."),
+        ]
+    )
+    agent = create_agent(model, tmp_path)
+
+    result = agent.invoke({"messages": [HumanMessage(content="Remove the duplicate subtract function")]})
+
+    tool_messages = [message for message in result["messages"] if isinstance(message, ToolMessage)]
+    assert "Found 2 occurrences" in str(tool_messages[0].content)
+    assert "Successfully replaced 1 block(s) in sample.py" in str(tool_messages[1].content)
+    assert source.read_text(encoding="utf-8").count("def subtract") == 1
+    assert result["messages"][-1].content == "Removed the duplicate function."
+
+
+def test_agent_stops_after_three_identical_edit_failures(tmp_path: Path) -> None:
+    source = tmp_path / "sample.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    repeated_call = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "edit",
+                "args": {
+                    "path": "sample.py",
+                    "edits": [{"oldText": "missing = 1", "newText": "value = 2"}],
+                },
+                "id": "placeholder",
+                "type": "tool_call",
+            }
+        ],
+    )
+    responses = []
+    for index in range(10):
+        response = repeated_call.model_copy(deep=True)
+        response.tool_calls[0]["id"] = f"failed-patch-{index}"
+        responses.append(response)
+    model = ScriptedToolModel(responses=responses)
+    agent = create_agent(model, tmp_path)
+
+    result = agent.invoke(
+        {"messages": [HumanMessage(content="Apply the change")]},
+        config={"recursion_limit": 20},
+    )
+
+    errors = [
+        message
+        for message in result["messages"]
+        if isinstance(message, ToolMessage) and message.status == "error"
+    ]
+    assert len(errors) == 3
+    assert model.response_index == 3
+    assert "Stopped after edit failed 3 times with identical arguments" in str(
+        result["messages"][-1].content
+    )
+    assert source.read_text(encoding="utf-8") == "value = 1\n"

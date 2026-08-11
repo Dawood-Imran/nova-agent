@@ -12,6 +12,7 @@ dependencies = [
     "langchain-core==1.5.3",
     "langchain-openai==1.4.2",
     "langgraph==1.2.10",
+    "pydantic==2.13.4",
     "prompt-toolkit==3.0.53",
     "python-dotenv==1.2.2",
 ]

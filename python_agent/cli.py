@@ -23,7 +23,7 @@ load_dotenv()  # Load environment variables from .env file
 class ToolUsageTracker(BaseCallbackHandler):
     """Print live tool activity and retain a concise per-prompt usage summary."""
 
-    summarized_arguments = {"content", "new_text", "old_text"}
+    summarized_arguments = {"content"}
     sensitive_argument_fragments = {"api_key", "password", "secret", "token"}
 
     def __init__(
@@ -71,6 +71,9 @@ class ToolUsageTracker(BaseCallbackHandler):
         lowered_key = key.lower()
         if any(fragment in lowered_key for fragment in self.sensitive_argument_fragments):
             return "<redacted>"
+        if key == "edits" and isinstance(value, list):
+            noun = "replacement" if len(value) == 1 else "replacements"
+            return f"<{len(value)} {noun}>"
         if key in self.summarized_arguments and isinstance(value, str):
             return f"<{len(value)} chars>"
         if isinstance(value, str) and len(value) > 120:
@@ -91,7 +94,11 @@ class ToolUsageTracker(BaseCallbackHandler):
         name, started = self._running.pop(run_id, ("tool", finished))
         elapsed = finished - started
         self.tool_names.append(name)
-        self.output(f"[tool] {name} failed in {elapsed:.3f}s: {type(error).__name__}")
+        detail = " ".join(str(error).split())
+        if len(detail) > 200:
+            detail = f"{detail[:197]}..."
+        suffix = f": {detail}" if detail else ""
+        self.output(f"[tool] {name} failed in {elapsed:.3f}s: {type(error).__name__}{suffix}")
 
     def finish_prompt(self, elapsed: float) -> None:
         count = len(self.tool_names)
