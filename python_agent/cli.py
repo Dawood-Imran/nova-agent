@@ -14,6 +14,11 @@ from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph.state import CompiledStateGraph
 from prompt_toolkit import PromptSession
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+from rich.theme import Theme
 
 from .agent import create_agent
 from .file_references import WorkspaceFileCompleter, build_referenced_file_context
@@ -22,17 +27,30 @@ load_dotenv()  # Load environment variables from .env file
 
 
 class ConsoleStream:
-    """Coordinate streamed assistant tokens with line-oriented tool status output."""
+    """Coordinate streamed assistant tokens with styled rich output."""
 
     def __init__(
         self,
         text_output: Callable[[str], None] | None = None,
-        line_output: Callable[[str], None] | None = None,
+        line_output: Callable[[Any], None] | None = None,
     ) -> None:
-        self.text_output = text_output or (lambda text: print(text, end="", flush=True))
-        self.line_output = line_output or print
+        self.console = Console(theme=Theme({
+            "tool.start": "bold blue",
+            "tool.end": "green",
+            "tool.error": "bold red",
+            "prompt.summary": "italic dim cyan",
+            "interrupt": "bold yellow",
+        }))
+        self.text_output = text_output or self._print_token
+        self.line_output = line_output or (lambda msg: self.console.print(msg))
+        self._use_tool_dashboard = line_output is None
+        self._tool_rows: list[dict[str, str]] = []
         self.received_text = False
         self._line_open = False
+
+    def _print_token(self, text: str) -> None:
+        self.console.print(text, end="")
+        self.console.file.flush()
 
     def token(self, text: str) -> None:
         if not text:
@@ -44,8 +62,67 @@ class ConsoleStream:
     def status(self, message: str) -> None:
         if self._line_open:
             self.line_output("")
-        self.line_output(message)
+
+        if self._use_tool_dashboard and self._record_tool_event(message):
+            self._render_tool_dashboard()
+            self._line_open = False
+            return
+
+        if "started" in message:
+            self.line_output(Text(message, style="tool.start"))
+        elif "completed" in message:
+            self.line_output(Text(message, style="tool.end"))
+        elif "failed" in message:
+            self.line_output(Text(message, style="tool.error"))
+        elif "[interrupt]" in message:
+            self.line_output(Text(message, style="interrupt"))
+        elif message.startswith("[prompt]"):
+            self.line_output(Text(message, style="prompt.summary"))
+        else:
+            self.line_output(message)
         self._line_open = False
+
+    def _record_tool_event(self, message: str) -> bool:
+        if not message.startswith("[tool] "):
+            return False
+
+        body = message.removeprefix("[tool] ")
+        if body.endswith(" started"):
+            call = body.removesuffix(" started")
+            name = call.split("(", 1)[0]
+            self._tool_rows.append({"status": "running", "tool": name, "detail": call})
+            return True
+        if " completed in " in body:
+            name, elapsed = body.split(" completed in ", 1)
+            self._finish_last_running_tool(name, "completed", elapsed)
+            return True
+        if " failed in " in body:
+            name, detail = body.split(" failed in ", 1)
+            self._finish_last_running_tool(name, "failed", detail)
+            return True
+        return False
+
+    def _finish_last_running_tool(self, name: str, status: str, detail: str) -> None:
+        for row in reversed(self._tool_rows):
+            if row["tool"] == name and row["status"] == "running":
+                row["status"] = status
+                row["detail"] = detail
+                return
+        self._tool_rows.append({"status": status, "tool": name, "detail": detail})
+
+    def _render_tool_dashboard(self) -> None:
+        table = Table.grid(expand=False)
+        table.add_column("Status", style="bold")
+        table.add_column("Tool", style="cyan")
+        table.add_column("Detail", style="dim")
+        for row in self._tool_rows[-8:]:
+            style = {
+                "running": "bold blue",
+                "completed": "green",
+                "failed": "bold red",
+            }.get(row["status"], "white")
+            table.add_row(Text(row["status"], style=style), row["tool"], row["detail"])
+        self.console.print(Panel(table, title="Tool Activity", border_style="blue", expand=False))
 
     def finish(self) -> None:
         if self._line_open:
@@ -146,6 +223,16 @@ def prepare_prompt(prompt: str, workspace: str | Path) -> str:
     return f"{prompt}\n\n{context}" if context else prompt
 
 
+def build_intervention_prompt(original_prompt: str, correction: str) -> str:
+    """Build a follow-up prompt that resumes after an interrupted turn."""
+    return (
+        "Previous turn was interrupted by the user before completion.\n"
+        "Use this correction and continue safely from the current workspace state.\n\n"
+        f"Original request:\n{original_prompt}\n\n"
+        f"User correction/intervention:\n{correction}"
+    )
+
+
 def _streamed_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -168,7 +255,7 @@ def run_prompt(
     workspace: str | Path | None = None,
     tracker: ToolUsageTracker | None = None,
     token_output: Callable[[str], None] | None = None,
-) -> tuple[list[BaseMessage], str]:
+) -> tuple[list[BaseMessage], str | None]:
     """Run one user turn and return the complete graph history and final text."""
     prepared_prompt = prepare_prompt(prompt, workspace) if workspace is not None else prompt
     started = perf_counter()
@@ -180,20 +267,27 @@ def run_prompt(
             result = cast(dict[str, Any], agent.invoke(graph_input, config=config))
         else:
             result: dict[str, Any] | None = None
-            for mode, payload in agent.stream(
-                graph_input,
-                config=config,
-                stream_mode=["messages", "values"],
-            ):
-                if mode == "messages":
-                    chunk, _metadata = payload
-                    if isinstance(chunk, AIMessageChunk):
-                        text_chunk = _streamed_text(chunk.content)
-                        if text_chunk:
-                            token_output(text_chunk)
-                            emitted_text = True
-                elif mode == "values":
-                    result = cast(dict[str, Any], payload)
+            try:
+                for mode, payload in agent.stream(
+                    graph_input,
+                    config=config,
+                    stream_mode=["messages", "values"],
+                ):
+                    if mode == "messages":
+                        chunk, _metadata = payload
+                        if isinstance(chunk, AIMessageChunk):
+                            text_chunk = _streamed_text(chunk.content)
+                            if text_chunk:
+                                token_output(text_chunk)
+                                emitted_text = True
+                    elif mode == "values":
+                        result = cast(dict[str, Any], payload)
+            except KeyboardInterrupt:
+                # Handle interrupt during graph execution
+                if tracker:
+                    tracker.output("\n[interrupt] User pressed Esc/Ctrl-C. Stopping current turn...")
+                return list(history), None
+
             if result is None:
                 raise RuntimeError("Agent stream ended without a final state")
 
@@ -241,8 +335,9 @@ def main() -> None:
             print(text)
         return
 
-    print(f"Workspace: {args.workspace.resolve()}")
-    print("Enter a request, use @ to reference a file, or type exit to quit.")
+    console = Console()
+    console.print(Panel(f"[bold blue]Workspace:[/bold blue] {args.workspace.resolve()}", expand=False))
+    console.print("[dim]Enter a request, use @ to reference a file, or type exit to quit.[/dim]")
     prompt_session: PromptSession[str] = PromptSession(
         completer=WorkspaceFileCompleter(args.workspace),
         complete_while_typing=True,
@@ -267,6 +362,31 @@ def main() -> None:
             tracker,
             console.token,
         )
+        if text is None:
+            console.finish()
+            try:
+                correction = prompt_session.prompt(
+                    "[intervention] Add correction and resume (blank to skip): "
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+            if correction:
+                resume_prompt = build_intervention_prompt(prompt, correction)
+                console = ConsoleStream()
+                tracker = ToolUsageTracker(output=console.status)
+                history, text = run_prompt(
+                    agent,
+                    history,
+                    resume_prompt,
+                    args.workspace,
+                    tracker,
+                    console.token,
+                )
+                console.finish()
+                if text is not None and not console.received_text and text:
+                    print(text)
+            continue
         console.finish()
         if not console.received_text and text:
             print(text)

@@ -3,7 +3,13 @@ from uuid import uuid4
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
-from python_agent.cli import ConsoleStream, ToolUsageTracker, prepare_prompt, run_prompt
+from python_agent.cli import (
+    ConsoleStream,
+    ToolUsageTracker,
+    build_intervention_prompt,
+    prepare_prompt,
+    run_prompt,
+)
 
 
 class FakeStreamingAgent:
@@ -13,6 +19,12 @@ class FakeStreamingAgent:
         yield "messages", (AIMessageChunk(content="Hel"), {"langgraph_node": "agent"})
         yield "messages", (AIMessageChunk(content="lo"), {"langgraph_node": "agent"})
         yield "values", {"messages": [*input["messages"], AIMessage(content="Hello")]}
+
+
+class FakeInterruptingAgent:
+    def stream(self, input, config=None, stream_mode=None):
+        del input, config, stream_mode
+        raise KeyboardInterrupt
 
 
 def test_prepare_prompt_adds_tagged_file_context(tmp_path: Path) -> None:
@@ -100,6 +112,24 @@ def test_run_prompt_streams_tokens_and_returns_final_history() -> None:
     assert text == "Hello"
 
 
+def test_run_prompt_interruption_keeps_existing_history() -> None:
+    original_history = [HumanMessage(content="previous")]
+    output: list[str] = []
+    tracker = ToolUsageTracker(output=output.append)
+
+    history, text = run_prompt(
+        FakeInterruptingAgent(),
+        original_history,
+        "Stop this",
+        tracker=tracker,
+        token_output=lambda token: None,
+    )
+
+    assert history == original_history
+    assert text is None
+    assert output[0] == "\n[interrupt] User pressed Esc/Ctrl-C. Stopping current turn..."
+
+
 def test_console_stream_separates_tokens_from_status_lines() -> None:
     output: list[str] = []
     stream = ConsoleStream(
@@ -119,3 +149,33 @@ def test_console_stream_separates_tokens_from_status_lines() -> None:
         "text:Done\n",
     ]
     assert stream.received_text is True
+
+
+def test_console_stream_default_token_output_does_not_crash(capsys) -> None:
+    stream = ConsoleStream()
+
+    stream.token("hey")
+    stream.finish()
+
+    captured = capsys.readouterr()
+    assert "hey" in captured.out
+
+
+def test_console_stream_default_status_renders_tool_dashboard(capsys) -> None:
+    stream = ConsoleStream()
+
+    stream.status("[tool] read(path='app.py') started")
+    stream.status("[tool] read completed in 0.123s")
+
+    captured = capsys.readouterr()
+    assert "Tool Activity" in captured.out
+    assert "read" in captured.out
+    assert "completed" in captured.out
+
+
+def test_build_intervention_prompt_includes_original_and_correction() -> None:
+    prompt = build_intervention_prompt("make endpoint", "use port 8001 instead")
+
+    assert "Previous turn was interrupted" in prompt
+    assert "make endpoint" in prompt
+    assert "use port 8001 instead" in prompt

@@ -343,9 +343,9 @@ def build_tools(workspace: str | Path) -> list[BaseTool]:
         return operations.git_diff(path, staged, max_chars)
 
     @tool("write")
-    def write_tool(path: str, content: str) -> str:
-        """Create or completely overwrite a UTF-8 text file and any missing parent directories."""
-        return operations.write(path, content)
+    def write_tool(path: str, content: str, overwrite: bool = False) -> str:
+        """Create a UTF-8 text file. Fails if file exists unless overwrite=True."""
+        return operations.write(path, content, overwrite=overwrite)
 
     @tool("edit", args_schema=EditToolInput, response_format="content_and_artifact")
     def edit_tool(
